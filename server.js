@@ -10,10 +10,11 @@ app.use(cors());
 app.use(express.json());
 
 /* =====================================
-   FILE UPLOAD CONFIG
+   FILE UPLOAD CONFIG (Memory Storage)
 ===================================== */
 
 const upload = multer({
+  storage: multer.memoryStorage(), // IMPORTANT for OCR
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
@@ -24,7 +25,7 @@ const upload = multer({
 app.get("/", (req, res) => {
   res.json({
     status: "Health Analyzer Backend Running",
-    version: "USDA + OCR FREE EDITION"
+    version: "USDA + OCR FREE EDITION",
   });
 });
 
@@ -53,7 +54,7 @@ app.post("/analyze-food", async (req, res) => {
     const food = data.foods[0];
     const nutrients = {};
 
-    food.foodNutrients.forEach(n => {
+    food.foodNutrients.forEach((n) => {
       nutrients[n.nutrientName] = n.value;
     });
 
@@ -63,11 +64,10 @@ app.post("/analyze-food", async (req, res) => {
       protein: nutrients["Protein"] || 0,
       carbs: nutrients["Carbohydrate, by difference"] || 0,
       fats: nutrients["Total lipid (fat)"] || 0,
-      fiber: nutrients["Fiber, total dietary"] || 0
+      fiber: nutrients["Fiber, total dietary"] || 0,
     });
-
   } catch (error) {
-    console.error(error);
+    console.error("Food Error:", error);
     res.status(500).json({ error: "Food analysis failed" });
   }
 });
@@ -82,29 +82,48 @@ app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
       return res.status(400).json({ error: "Prescription image required" });
     }
 
+    // OCR using buffer
     const result = await Tesseract.recognize(
       req.file.buffer,
-      "eng"
+      "eng",
+      { logger: (m) => console.log(m.status) }
     );
 
     const extractedText = result.data.text;
 
-    // Basic medicine detection logic
-    const medicines = extractedText
-      .split("\n")
-      .filter(line =>
-        line.toLowerCase().includes("mg") ||
-        line.toLowerCase().includes("tab") ||
-        line.toLowerCase().includes("tablet")
-      );
+    // Advanced Medicine Detection
+    const lines = extractedText.split("\n");
+    const medicines = [];
 
-    res.json({
-      extractedText,
-      medicines: medicines.length > 0 ? medicines : ["No clear medicines detected"]
+    lines.forEach((line) => {
+      const lower = line.toLowerCase();
+
+      if (
+        lower.includes("mg") ||
+        lower.includes("tablet") ||
+        lower.includes("tab") ||
+        lower.includes("capsule") ||
+        lower.includes("syrup")
+      ) {
+        medicines.push({
+          name: line.trim(),
+          dosage: "As prescribed",
+          timing: "Follow doctor instructions",
+          duration: "Check prescription",
+        });
+      }
     });
 
+    res.json({
+      rawText: extractedText,
+      medicines:
+        medicines.length > 0
+          ? medicines
+          : [{ name: "No clear medicines detected" }],
+      doctor: "Doctor name may appear in header section",
+    });
   } catch (error) {
-    console.error(error);
+    console.error("Prescription Error:", error);
     res.status(500).json({ error: "Prescription analysis failed" });
   }
 });
