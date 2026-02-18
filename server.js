@@ -1,5 +1,7 @@
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
+const Tesseract = require("tesseract.js");
 require("dotenv").config();
 
 const app = express();
@@ -8,13 +10,21 @@ app.use(cors());
 app.use(express.json());
 
 /* =====================================
+   FILE UPLOAD CONFIG
+===================================== */
+
+const upload = multer({
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
+
+/* =====================================
    ROOT CHECK
 ===================================== */
 
 app.get("/", (req, res) => {
   res.json({
     status: "Health Analyzer Backend Running",
-    version: "USDA FREE EDITION"
+    version: "USDA + OCR FREE EDITION"
   });
 });
 
@@ -41,7 +51,6 @@ app.post("/analyze-food", async (req, res) => {
     }
 
     const food = data.foods[0];
-
     const nutrients = {};
 
     food.foodNutrients.forEach(n => {
@@ -60,6 +69,43 @@ app.post("/analyze-food", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Food analysis failed" });
+  }
+});
+
+/* =====================================
+   PRESCRIPTION ANALYSIS (OCR FREE)
+===================================== */
+
+app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "Prescription image required" });
+    }
+
+    const result = await Tesseract.recognize(
+      req.file.buffer,
+      "eng"
+    );
+
+    const extractedText = result.data.text;
+
+    // Basic medicine detection logic
+    const medicines = extractedText
+      .split("\n")
+      .filter(line =>
+        line.toLowerCase().includes("mg") ||
+        line.toLowerCase().includes("tab") ||
+        line.toLowerCase().includes("tablet")
+      );
+
+    res.json({
+      extractedText,
+      medicines: medicines.length > 0 ? medicines : ["No clear medicines detected"]
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Prescription analysis failed" });
   }
 });
 
