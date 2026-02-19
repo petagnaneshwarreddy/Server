@@ -4,6 +4,10 @@ const multer = require("multer");
 const Tesseract = require("tesseract.js");
 require("dotenv").config();
 
+// If Node < 18, uncomment this:
+// const fetch = (...args) =>
+//   import("node-fetch").then(({ default: fetch }) => fetch(...args));
+
 const app = express();
 
 /* =====================================
@@ -20,12 +24,12 @@ app.use(
 app.use(express.json());
 
 /* =====================================
-   FILE UPLOAD (Memory Storage)
+   FILE UPLOAD CONFIG (Memory)
 ===================================== */
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
 /* =====================================
@@ -59,10 +63,6 @@ app.post("/analyze-food", async (req, res) => {
       `https://api.nal.usda.gov/fdc/v1/foods/search?query=${foodName}&api_key=${process.env.USDA_API_KEY}`
     );
 
-    if (!response.ok) {
-      throw new Error("USDA API error");
-    }
-
     const data = await response.json();
 
     if (!data.foods || data.foods.length === 0) {
@@ -85,7 +85,7 @@ app.post("/analyze-food", async (req, res) => {
       fiber: nutrients["Fiber, total dietary"] || 0,
     });
   } catch (error) {
-    console.error("❌ Food Error:", error.message);
+    console.error("Food Error:", error);
     res.status(500).json({ error: "Food analysis failed" });
   }
 });
@@ -95,8 +95,6 @@ app.post("/analyze-food", async (req, res) => {
 ===================================== */
 
 app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
-  let worker;
-
   try {
     if (!req.file) {
       return res.status(400).json({ error: "Prescription image required" });
@@ -104,20 +102,48 @@ app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
 
     console.log("📷 File received:", req.file.originalname);
 
-    // Create worker (safer than direct recognize)
-    worker = await Tesseract.createWorker("eng");
+    const result = await Tesseract.recognize(
+      req.file.buffer,
+      "eng",
+      { logger: (m) => console.log("OCR:", m.status) }
+    );
 
-    const { data } = await worker.recognize(req.file.buffer);
+    const extractedText = result.data.text;
 
-    const extractedText = data.text;
-
-    if (!extractedText || extractedText.trim() === "") {
-      return res.status(400).json({
-        error: "Could not read prescription text clearly",
-      });
+    if (!extractedText) {
+      return res.status(400).json({ error: "No text detected" });
     }
 
-    const medicines = extractMedicines(extractedText);
+    const lines = extractedText.split("\n");
+    const medicines = [];
+
+    lines.forEach((line) => {
+      const clean = line.trim();
+      const lower = clean.toLowerCase();
+
+      // Smart medicine detection
+      const isMedicine =
+        /\d/.test(clean) && (
+          lower.includes("mg") ||
+          lower.includes("m ") ||
+          lower.includes("tab") ||
+          lower.includes("cap") ||
+          lower.includes("bd") ||
+          lower.includes("td") ||
+          lower.includes("qd") ||
+          lower.includes("od") ||
+          lower.includes("ml")
+        );
+
+      if (isMedicine) {
+        medicines.push({
+          name: extractMedicineName(clean),
+          dosage: extractDosage(clean),
+          timing: extractTiming(clean),
+          duration: "As prescribed",
+        });
+      }
+    });
 
     res.json({
       rawText: extractedText,
@@ -127,15 +153,10 @@ app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
           : [{ name: "No clear medicines detected" }],
       doctor: extractDoctorName(extractedText),
     });
+
   } catch (error) {
-    console.error("❌ OCR Error:", error.message);
-    res.status(500).json({
-      error: "OCR failed (memory limit or unclear image)",
-    });
-  } finally {
-    if (worker) {
-      await worker.terminate();
-    }
+    console.error("Prescription Error:", error);
+    res.status(500).json({ error: "Prescription analysis failed" });
   }
 });
 
@@ -143,54 +164,23 @@ app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
    HELPER FUNCTIONS
 ===================================== */
 
-function extractMedicines(text) {
-  const lines = text.split("\n");
-  const medicines = [];
-
-  lines.forEach((line) => {
-    const lower = line.toLowerCase();
-
-    if (
-      lower.includes("mg") ||
-      lower.includes("tablet") ||
-      lower.includes("tab") ||
-      lower.includes("capsule") ||
-      lower.includes("syrup") ||
-      lower.includes("ml")
-    ) {
-      medicines.push({
-        name: line.trim(),
-        dosage: extractDosage(line),
-        timing: detectTiming(line),
-        duration: detectDuration(line),
-      });
-    }
-  });
-
-  return medicines;
-}
-
 function extractDosage(text) {
-  const match = text.match(/(\d+ ?mg|\d+ ?ml)/i);
+  const match = text.match(/(\d+\s?(mg|ml|m))/i);
   return match ? match[0] : "Not specified";
 }
 
-function detectTiming(text) {
+function extractTiming(text) {
   const lower = text.toLowerCase();
 
-  if (lower.includes("bd") || lower.includes("twice"))
-    return "Twice Daily";
-  if (lower.includes("tds") || lower.includes("thrice"))
-    return "Three Times Daily";
-  if (lower.includes("od") || lower.includes("once"))
-    return "Once Daily";
+  if (lower.includes("bd")) return "Twice Daily";
+  if (lower.includes("td")) return "Three Times Daily";
+  if (lower.includes("qd") || lower.includes("od")) return "Once Daily";
 
   return "Follow doctor instructions";
 }
 
-function detectDuration(text) {
-  const match = text.match(/(\d+ ?days|\d+ ?weeks)/i);
-  return match ? match[0] : "As prescribed";
+function extractMedicineName(text) {
+  return text.replace(/(\d+\s?(mg|ml|m).*)/i, "").trim();
 }
 
 function extractDoctorName(text) {
