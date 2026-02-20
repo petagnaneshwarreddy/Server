@@ -4,15 +4,15 @@ const multer = require("multer");
 const Tesseract = require("tesseract.js");
 require("dotenv").config();
 
-// If Node < 18, uncomment this:
-// const fetch = (...args) =>
-//   import("node-fetch").then(({ default: fetch }) => fetch(...args));
-
 const app = express();
 
 /* =====================================
-   CORS CONFIG
+   BASIC SERVER SETTINGS
 ===================================== */
+
+// Increase server timeout (important for OCR)
+const server = require("http").createServer(app);
+server.timeout = 120000; // 2 minutes
 
 app.use(
   cors({
@@ -24,7 +24,23 @@ app.use(
 app.use(express.json());
 
 /* =====================================
-   FILE UPLOAD CONFIG (Memory)
+   HEALTH CHECK (IMPORTANT FOR RENDER)
+===================================== */
+
+app.get("/", (req, res) => {
+  res.status(200).json({
+    status: "NutriScan AI Backend Running",
+    uptime: process.uptime(),
+  });
+});
+
+// Better health endpoint for cron-job
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
+/* =====================================
+   FILE UPLOAD CONFIG
 ===================================== */
 
 const upload = multer({
@@ -33,18 +49,7 @@ const upload = multer({
 });
 
 /* =====================================
-   ROOT CHECK
-===================================== */
-
-app.get("/", (req, res) => {
-  res.json({
-    status: "Health Analyzer Backend Running",
-    version: "OCR + USDA STABLE BUILD",
-  });
-});
-
-/* =====================================
-   FOOD ANALYSIS (USDA FREE)
+   FOOD ANALYSIS
 ===================================== */
 
 app.post("/analyze-food", async (req, res) => {
@@ -91,7 +96,7 @@ app.post("/analyze-food", async (req, res) => {
 });
 
 /* =====================================
-   PRESCRIPTION ANALYSIS (OCR)
+   PRESCRIPTION ANALYSIS (OPTIMIZED)
 ===================================== */
 
 app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
@@ -102,48 +107,20 @@ app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
 
     console.log("📷 File received:", req.file.originalname);
 
+    // Run OCR
     const result = await Tesseract.recognize(
       req.file.buffer,
       "eng",
-      { logger: (m) => console.log("OCR:", m.status) }
+      { logger: () => {} } // remove heavy logging
     );
 
-    const extractedText = result.data.text;
+    const extractedText = result?.data?.text;
 
     if (!extractedText) {
       return res.status(400).json({ error: "No text detected" });
     }
 
-    const lines = extractedText.split("\n");
-    const medicines = [];
-
-    lines.forEach((line) => {
-      const clean = line.trim();
-      const lower = clean.toLowerCase();
-
-      // Smart medicine detection
-      const isMedicine =
-        /\d/.test(clean) && (
-          lower.includes("mg") ||
-          lower.includes("m ") ||
-          lower.includes("tab") ||
-          lower.includes("cap") ||
-          lower.includes("bd") ||
-          lower.includes("td") ||
-          lower.includes("qd") ||
-          lower.includes("od") ||
-          lower.includes("ml")
-        );
-
-      if (isMedicine) {
-        medicines.push({
-          name: extractMedicineName(clean),
-          dosage: extractDosage(clean),
-          timing: extractTiming(clean),
-          duration: "As prescribed",
-        });
-      }
-    });
+    const medicines = detectMedicines(extractedText);
 
     res.json({
       rawText: extractedText,
@@ -156,16 +133,57 @@ app.post("/analyze-prescription", upload.single("file"), async (req, res) => {
 
   } catch (error) {
     console.error("Prescription Error:", error);
-    res.status(500).json({ error: "Prescription analysis failed" });
+
+    res.status(500).json({
+      error: "Prescription analysis failed. Server may be waking up.",
+    });
   }
 });
 
 /* =====================================
-   HELPER FUNCTIONS
+   MEDICINE DETECTION
+===================================== */
+
+function detectMedicines(text) {
+  const lines = text.split("\n");
+  const medicines = [];
+
+  lines.forEach((line) => {
+    const clean = line.trim();
+    const lower = clean.toLowerCase();
+
+    const isMedicine =
+      /\d/.test(clean) &&
+      (
+        lower.includes("mg") ||
+        lower.includes("ml") ||
+        lower.includes("tab") ||
+        lower.includes("cap") ||
+        lower.includes("bd") ||
+        lower.includes("td") ||
+        lower.includes("qd") ||
+        lower.includes("od")
+      );
+
+    if (isMedicine) {
+      medicines.push({
+        name: extractMedicineName(clean),
+        dosage: extractDosage(clean),
+        timing: extractTiming(clean),
+        duration: "As prescribed",
+      });
+    }
+  });
+
+  return medicines;
+}
+
+/* =====================================
+   HELPERS
 ===================================== */
 
 function extractDosage(text) {
-  const match = text.match(/(\d+\s?(mg|ml|m))/i);
+  const match = text.match(/(\d+\s?(mg|ml))/i);
   return match ? match[0] : "Not specified";
 }
 
@@ -180,7 +198,7 @@ function extractTiming(text) {
 }
 
 function extractMedicineName(text) {
-  return text.replace(/(\d+\s?(mg|ml|m).*)/i, "").trim();
+  return text.replace(/(\d+\s?(mg|ml).*)/i, "").trim();
 }
 
 function extractDoctorName(text) {
@@ -199,6 +217,6 @@ function extractDoctorName(text) {
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 NutriScan AI Backend running on port ${PORT}`);
 });
